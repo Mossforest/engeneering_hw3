@@ -8,6 +8,7 @@ import shutil
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.nn.parallel
@@ -53,9 +54,7 @@ parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                     help='use pre-trained model')
 parser.add_argument('--seed', default=212, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--gpu', default=0, type=int,
-                    help='GPU id to use.')
-
+parser.add_argument("--local-rank", default=-1, type=int)
 
 
 def main():
@@ -73,16 +72,19 @@ def main():
     # seed
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    # create model
-    print(f"=> creating model resnet50, pretrained: {args.pretrained}")
-    model = resnet50(pretrained=args.pretrained)
+
     # set device
     if not torch.cuda.is_available():
         print('using CPU, this will be slow')
     else:
-        torch.cuda.set_device(args.gpu)
-        model = model.cuda(args.gpu)
-        device = torch.device('cuda:{}'.format(args.gpu))
+        torch.cuda.set_device(args.local_rank)
+        dist.init_process_group(backend='nccl')
+        device = torch.device('cuda:{}'.format(args.local_rank))
+
+    # create model
+    print(f"=> creating model resnet50, pretrained: {args.pretrained}")
+    model = resnet50(pretrained=args.pretrained)
+    model = model.to(device)
 
     # define loss func, optim, scheduler
     criterion = nn.CrossEntropyLoss().to(device)
@@ -101,17 +103,17 @@ def main():
             print("=> loading checkpoint '{}'".format(args.resume))
             with open(logpath, 'a') as file:
                 file.write("=> loading checkpoint '{}'\n".format(args.resume))
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and args.local_rank:
                 # Map model to be loaded to specified single gpu.
-                loc = 'cuda:{}'.format(args.gpu)
+                loc = 'cuda:{}'.format(args.local_rank)
                 checkpoint = torch.load(args.resume, map_location=loc)
             else:
                 checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch']
             best_acc1 = checkpoint['best_acc1']
-            if args.gpu is not None:
+            if args.local_rank is not None:
                 # best_acc1 may be from a checkpoint from a different GPU
-                best_acc1 = best_acc1.to(args.gpu)
+                best_acc1 = best_acc1.to(args.local_rank)
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
@@ -120,6 +122,7 @@ def main():
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
 
+    model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
 
     # Data loading code
     traindir = os.path.join(args.data, 'train')
@@ -145,25 +148,30 @@ def main():
             normalize,
         ]))
 
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
+        train_dataset, batch_size=args.batch_size, sampler=train_sampler,
         num_workers=args.workers, pin_memory=True)
 
+    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
     val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False,
+        val_dataset, batch_size=args.batch_size, sampler=val_sampler,
         num_workers=args.workers, pin_memory=True)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, args)
+        validate(val_loader, model, criterion, device, args)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
+
+        train_loader.sampler.set_epoch(epoch)
+        val_loader.sampler.set_epoch(epoch)
 
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, device, args)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        acc1 = validate(val_loader, model, criterion, device, args)
         
         scheduler.step()
         
@@ -223,7 +231,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         batch_time.append(time.time() - end)
         end = time.time()
 
-        if i % args.print_freq == 0:
+        if args.local_rank == 0 and i % args.print_freq == 0:
             print(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}')
             with open(args.logpath, 'a') as file:
                 file.write(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}\n')
@@ -232,11 +240,12 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
     losses = torch.Tensor(losses)
     top1 = torch.Tensor(top1)
     top5 = torch.Tensor(top5)
-    print(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}')
-    with open(args.logpath, 'a') as file:
-        file.write(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
+    if args.local_rank == 0:
+        print(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}')
+        with open(args.logpath, 'a') as file:
+            file.write(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
 
-def validate(val_loader, model, criterion, args):
+def validate(val_loader, model, criterion, device, args):
 
     model.eval()
     batch_time = []
@@ -248,8 +257,8 @@ def validate(val_loader, model, criterion, args):
     with torch.no_grad():
         for i, (images, target) in enumerate(val_loader):
             if torch.cuda.is_available():
-                images = images.cuda(args.gpu, non_blocking=True)
-                target = target.cuda(args.gpu, non_blocking=True)
+                images = images.cuda(device, non_blocking=True)
+                target = target.cuda(device, non_blocking=True)
 
             # compute output
             output = model(images)
@@ -263,7 +272,7 @@ def validate(val_loader, model, criterion, args):
             top1.append(acc1[0])
             top5.append(acc5[0])
 
-            if i % args.print_freq == 0:
+            if args.local_rank == 0 and i % args.print_freq == 0:
                 print(f'\t\tround {i}, batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}')
                 with open(args.logpath, 'a') as file:
                     file.write(f'\t\tround {i}, batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}\n')
@@ -272,9 +281,10 @@ def validate(val_loader, model, criterion, args):
     losses = torch.Tensor(losses)
     top1 = torch.Tensor(top1)
     top5 = torch.Tensor(top5)
-    print(f'final average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}')
-    with open(args.logpath, 'a') as file:
-        file.write(f'final average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
+    if args.local_rank == 0:
+        print(f'final average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}')
+        with open(args.logpath, 'a') as file:
+            file.write(f'final average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
     return top1.mean()
 
 def accuracy(output, target, topk=(1,)):
