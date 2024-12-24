@@ -41,7 +41,7 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('-n', '--name', default='tmp',
+parser.add_argument('-n', '--name', default='allreduce',
                     help='experiment name')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
@@ -50,7 +50,7 @@ parser.add_argument('--pretrained', dest='pretrained', action='store_true',
 parser.add_argument('--seed', default=212, type=int,
                     help='seed for initializing training. ')
 
-    
+
 
 def save_checkpoint(state, is_best, exp_name, filename='checkpoint.pth.tar'):
     filepath = '/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/chenxinyan-240108120066/chenxinyan/engineering_hw3/outputs/' + exp_name
@@ -61,7 +61,7 @@ def save_checkpoint(state, is_best, exp_name, filename='checkpoint.pth.tar'):
         shutil.copyfile(filepath+'/'+filename, filepath+'/'+'model_best.pth.tar')
 
 
-def train(train_loader, model, criterion, optimizer, epoch, device, group, args):
+def train(train_loader, model, criterion, optimizer, epoch, device, group, rank, size, args):
     batch_time = []
     losses = []
     top1 = []
@@ -79,8 +79,10 @@ def train(train_loader, model, criterion, optimizer, epoch, device, group, args)
         # compute output
         output = model(images)
         loss = criterion(output, target)
+        # print(f'== debug before: rank {rank} has loss {loss.item()}')
         dist.all_reduce(loss, op=dist.ReduceOp.SUM, group=group)
-        print(f'== debug: rank {rank} has loss {loss[0]}')
+        loss /= size
+        # print(f'== debug after : rank {rank} has loss {loss.item()}')
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -112,7 +114,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, group, args)
         with open(args.logpath, 'a') as file:
             file.write(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
 
-def validate(val_loader, model, criterion, device, group, args):
+def validate(val_loader, model, criterion, device, group, rank, size, args):
 
     model.eval()
     batch_time = []
@@ -244,7 +246,7 @@ def run(rank, size, args):
         num_workers=args.workers, pin_memory=True)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, device, group, args)
+        validate(val_loader, model, criterion, device, group, rank, size, args)
         return
 
     for epoch in range(args.epochs):
@@ -253,10 +255,10 @@ def run(rank, size, args):
         val_loader.sampler.set_epoch(epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, device, group, args)
+        train(train_loader, model, criterion, optimizer, epoch, device, group, rank, size, args)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, device, group, args)
+        acc1 = validate(val_loader, model, criterion, device, group, rank, size, args)
         
         scheduler.step()
         
