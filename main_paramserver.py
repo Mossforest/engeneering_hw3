@@ -2,6 +2,8 @@ import argparse
 import os
 import random
 import time
+
+from networkx import krackhardt_kite_graph
 import numpy as np
 import shutil
 
@@ -61,7 +63,7 @@ def save_checkpoint(state, is_best, exp_name, filename='checkpoint.pth.tar'):
         shutil.copyfile(filepath+'/'+filename, filepath+'/'+'model_best.pth.tar')
 
 
-def train(train_loader, model, criterion, optimizer, epoch, device, group, rank, size, args):
+def train(train_loader, model, criterion, optimizer, epoch, device, rank, size, args):
     batch_time = []
     losses = []
     top1 = []
@@ -79,10 +81,29 @@ def train(train_loader, model, criterion, optimizer, epoch, device, group, rank,
         # compute output
         output = model(images)
         loss = criterion(output, target)
-        # print(f'== debug before: rank {rank} has loss {loss.item()}')
-        dist.all_reduce(loss, op=dist.ReduceOp.SUM, group=group)
-        loss /= size
-        # print(f'== debug after : rank {rank} has loss {loss.item()}')
+        print(f'== debug before: rank {rank} has loss {loss.item()}')
+        req = None
+        if rank == 0:
+            tmp_loss = None
+            for irank in range(1, size):
+                req = dist.irecv(tensor=tmp_loss, src=irank)
+                req.wait()
+                loss += tmp_loss
+            loss /= size
+        else:
+            req = dist.isend(tensor=loss, dst=0)
+            req.wait()
+        print(f'== debug after : rank {rank} has loss {loss.item()}')
+        
+        # update loss to other rank
+        if rank == 0:
+            for irank in range(1, size):
+                req = dist.isend(tensor=loss, dst=irank)
+                req.wait()
+        else:
+            req = dist.irecv(tensor=loss, src=0)
+            req.wait()
+        print(f'== debug final : rank {rank} has loss {loss.item()}')
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -114,7 +135,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, group, rank,
         with open(args.logpath, 'a') as file:
             file.write(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
 
-def validate(val_loader, model, criterion, device, group, rank, size, args):
+def validate(val_loader, model, criterion, device, rank, size, args):
 
     model.eval()
     batch_time = []
@@ -191,7 +212,6 @@ def run(rank, size, args):
     # set device
     device = torch.device('cuda:{}'.format(rank))
     torch.cuda.set_device(device)
-    group = dist.new_group(list(range(size)))
 
     # create model
     print(f"=> creating model resnet50, pretrained: {args.pretrained}")
@@ -246,7 +266,7 @@ def run(rank, size, args):
         num_workers=args.workers, pin_memory=True)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, device, group, rank, size, args)
+        validate(val_loader, model, criterion, device, rank, size, args)
         return
 
     for epoch in range(args.epochs):
@@ -255,10 +275,10 @@ def run(rank, size, args):
         val_loader.sampler.set_epoch(epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, device, group, rank, size, args)
+        train(train_loader, model, criterion, optimizer, epoch, device, rank, size, args)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, device, group, rank, size, args)
+        acc1 = validate(val_loader, model, criterion, device, rank, size, args)
         
         scheduler.step()
         
@@ -279,7 +299,7 @@ def init_process(rank, size, fn, args, backend='nccl'):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = 'localhost' # '127.0.0.1'
     os.environ['MASTER_PORT'] = '8090'
-    os.environ['NCCL_ALGO'] = 'Ring' # 'Tree'
+    # os.environ['NCCL_ALGO'] = 'Ring' # 'Tree'
     dist.init_process_group(backend, rank=rank, world_size=size)
     fn(rank, size, args)
 
