@@ -19,15 +19,14 @@ import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.datasets as datasets
-from torchvision.models import resnet50, ResNet
+from torchvision.models import ResNet, Bottleneck
 import torchvision.transforms as transforms
 from torch.optim.lr_scheduler import StepLR
-from torch.utils.data import Subset
 
 
 def remote_method(method, rref, *args, **kwargs):
     args = [method, rref] + list(args)
-    return rpc.rpc_sync(rref.owner(), call_method, args=args, kwargs=kwargs)
+    return rpc.rpc_sync(rref.owner(), method, args=args, kwargs=kwargs)
 
 class DistributedResNet(ResNet):
     def __init__(self, 
@@ -35,7 +34,7 @@ class DistributedResNet(ResNet):
         layers,
         num_gpus = 0
     ):
-        super(DistributedResNet50, self).__init__(block, layers)
+        super(DistributedResNet, self).__init__(block, layers)
         print(f"Using {num_gpus} GPUs to train")
         self.num_gpus = num_gpus
         device = torch.device(
@@ -184,14 +183,14 @@ def run_training_loop(rank, num_gpus, train_loader, test_loader, args):
 
     # Build DistributedOptimizer.
     param_rrefs = net.get_global_param_rrefs()
-    opt = DistributedOptimizer(optim.SGD, param_rrefs, args.lr,
+    opt = DistributedOptimizer(torch.optim.SGD, param_rrefs, args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
     lrs_rrefs = []
     for opt_rref in opt.remote_optimizers:
-        lrs_rrefs = rptc.remote(opt_rref.owner(), create_lr_schheduler, args=(opt_rref,))
+        lrs_rrefs = rpc.remote(opt_rref.owner(), create_lr_schheduler, args=(opt_rref,))
 
-    for epoch in range(artgs.epochs):
+    for epoch in range(args.epochs):
         losses = []
         top1 = []
         top5 = []
@@ -205,7 +204,7 @@ def run_training_loop(rank, num_gpus, train_loader, test_loader, args):
                 criterion = nn.CrossEntropyLoss().to(model_output.device)
                 loss = criterion(model_output, target)
 
-                acc1, acc5 = accuracy(output, target, topk=(1, 5))
+                acc1, acc5 = accuracy(model_output, target, topk=(1, 5))
                 losses.append(loss.item())
                 top1.append(acc1[0])
                 top5.append(acc5[0])
@@ -239,10 +238,10 @@ def run_training_loop(rank, num_gpus, train_loader, test_loader, args):
 
         print(f"Training epoch {epoch} complete!")
         print("Getting accuracy....")
-        get_accuracy(rank, test_loader, net, args)
+        get_accuracy(rank, epoch, test_loader, net, args)
 
 
-def get_accuracy(rank, test_loader, model, args):
+def get_accuracy(rank, epoch, test_loader, model, args):
     model.eval()
     losses = []
     top1 = []
@@ -258,7 +257,7 @@ def get_accuracy(rank, test_loader, model, args):
             criterion = nn.CrossEntropyLoss().to(device)
             loss = criterion(out, target)
 
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            acc1, acc5 = accuracy(out, target, topk=(1, 5))
             losses.append(loss.item())
             top1.append(acc1[0])
             top5.append(acc5[0])
@@ -333,7 +332,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--master_addr",
         type=str,
-        default="10.244.193.23", # localhost
+        default="localhost",
         help="""Address of master, will default to localhost if not provided.
             Master must be able to accept network traffic on the address + port.""")
     parser.add_argument(
@@ -387,10 +386,10 @@ if __name__ == '__main__':
                 normalize,
             ]))
         train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=args.batch_size, sampler=train_sampler,
+            train_dataset, batch_size=args.batch_size,
             num_workers=args.workers, shuffle=True, pin_memory=True)
         test_loader = torch.utils.data.DataLoader(
-            val_dataset, batch_size=args.batch_size, sampler=val_sampler,
+            val_dataset, batch_size=args.batch_size,
             num_workers=args.workers, shuffle=True, pin_memory=True)   # ?: shuffle=True??
         # start training worker on this node
         p = mp.Process(
