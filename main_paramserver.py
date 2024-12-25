@@ -43,7 +43,7 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('-n', '--name', default='allreduce',
+parser.add_argument('-n', '--name', default='paaramserver',
                     help='experiment name')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
@@ -84,7 +84,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, rank, size, 
         print(f'== debug before: rank {rank} has loss {loss.item()}')
         req = None
         if rank == 0:
-            tmp_loss = None
+            tmp_loss = torch.zeros_like(loss).to(device)
             for irank in range(1, size):
                 req = dist.irecv(tensor=tmp_loss, src=irank)
                 req.wait()
@@ -197,10 +197,10 @@ def accuracy(output, target, topk=(1,)):
 def run(rank, size, args):
     # logs
     logpath = '/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/chenxinyan-240108120066/chenxinyan/engineering_hw3/outputs/' + args.name
-    if not os.path.exists(logpath):
-        os.makedirs(logpath)
-    logpath = logpath + '/log.txt'
     if rank == 0:
+        if not os.path.exists(logpath):
+            os.makedirs(logpath)
+        logpath = logpath + '/log.txt'
         with open(logpath, 'a') as file:
             file.write(f"Experiment: {args.name}\n")
     args.logpath = logpath
@@ -298,7 +298,8 @@ def run(rank, size, args):
 def init_process(rank, size, fn, args, backend='nccl'):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = 'localhost' # '127.0.0.1'
-    os.environ['MASTER_PORT'] = '8090'
+    os.environ['MASTER_PORT'] = '8095' # '8090'
+    os.environ['NCCL_DEBUG'] = 'INFO'
     # os.environ['NCCL_ALGO'] = 'Ring' # 'Tree'
     dist.init_process_group(backend, rank=rank, world_size=size)
     fn(rank, size, args)
