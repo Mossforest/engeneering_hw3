@@ -602,19 +602,19 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         batch_time.append(time.time() - end)
         end = time.time()
 
-        # if args.local_rank == 0 and i % args.print_freq == 0:
-        #     print(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}')
-        #     with open(args.logpath, 'a') as file:
-        #         file.write(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}\n')
+        if args.local_rank == 0 and i % args.print_freq == 0:
+            print(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}')
+            with open(args.logpath, 'a') as file:
+                file.write(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}\n')
 
     batch_time = torch.Tensor(batch_time)
     losses = torch.Tensor(losses)
     top1 = torch.Tensor(top1)
     top5 = torch.Tensor(top5)
-    # if args.local_rank == 0:
-    #     print(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}')
-    #     with open(args.logpath, 'a') as file:
-    #         file.write(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
+    if args.local_rank == 0:
+        print(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}')
+        with open(args.logpath, 'a') as file:
+            file.write(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
 
 def validate(val_loader, model, criterion, device, args):
 
@@ -643,19 +643,19 @@ def validate(val_loader, model, criterion, device, args):
             top1.append(acc1[0])
             top5.append(acc5[0])
 
-            # if args.local_rank == 0 and i % args.print_freq == 0:
-            #     print(f'\t\tround {i}, batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}')
-            #     with open(args.logpath, 'a') as file:
-            #         file.write(f'\t\tround {i}, batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}\n')
+            if args.local_rank == 0 and i % args.print_freq == 0:
+                print(f'\t\tround {i}, batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}')
+                with open(args.logpath, 'a') as file:
+                    file.write(f'\t\tround {i}, batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}\n')
 
     batch_time = torch.Tensor(batch_time)
     losses = torch.Tensor(losses)
     top1 = torch.Tensor(top1)
     top5 = torch.Tensor(top5)
-    # if args.local_rank == 0:
-    #     print(f'final average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}')
-    #     with open(args.logpath, 'a') as file:
-    #         file.write(f'final average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
+    if args.local_rank == 0:
+        print(f'final average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}')
+        with open(args.logpath, 'a') as file:
+            file.write(f'final average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
     return top1.mean()
 
 def accuracy(output, target, topk=(1,)):
@@ -679,5 +679,6 @@ if __name__ == '__main__':
     # os.environ['MASTER_ADDR'] = 'localhost' # '127.0.0.1'
     # os.environ['MASTER_PORT'] = '8095' # '8090'
     os.environ['NCCL_DEBUG'] = 'INFO'
+    os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
     torch.set_printoptions(threshold=1, edgeitems=1, linewidth=100000)
     main()
