@@ -4,6 +4,7 @@ import random
 import time
 import numpy as np
 import shutil
+import csv
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -25,7 +26,7 @@ parser.add_argument('data', metavar='DIR', nargs='?', default='/inspire/hdd/ws-f
                     help='path to dataset (default: imagenet)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=90, type=int, metavar='N',
+parser.add_argument('--epochs', default=5, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -62,13 +63,19 @@ def main():
     args = parser.parse_args()
 
     # logs
-    logpath = '/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/chenxinyan-240108120066/chenxinyan/engineering_hw3/outputs/' + args.name
-    if not os.path.exists(logpath):
-        os.makedirs(logpath)
-    logpath = logpath + '/log.txt'
+    workpath = '/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/chenxinyan-240108120066/chenxinyan/engineering_hw3/outputs/' + args.name
+    if not os.path.exists(workpath):
+        os.makedirs(workpath)
+    logpath = workpath + '/log.txt'
     with open(logpath, 'a') as file:
         file.write(f"Experiment: {args.name}\n")
     args.logpath = logpath
+
+    csv_path = workpath + '/metrics.csv'
+    with open(csv_path, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Epoch', 'Batch', 'Batch Time', 'Loss', 'Top1 Accuracy', 'Top5 Accuracy', 'Throughput (samples/s)', 'GPU Utilization (%)', 'Memory Allocated (GB)', 'Memory Reserved (GB)'])
+    args.csv_path = csv_path
 
     # seed
     random.seed(args.seed)
@@ -177,15 +184,14 @@ def main():
             'best_acc1': best_acc1,
             'optimizer' : optimizer.state_dict(),
             'scheduler' : scheduler.state_dict()
-        }, is_best, args.name)
+        }, is_best, workpath)
 
-def save_checkpoint(state, is_best, exp_name, filename='checkpoint.pth.tar'):
-    filepath = '/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/chenxinyan-240108120066/chenxinyan/engineering_hw3/outputs/' + exp_name
-    if not os.path.exists(filepath):
-        os.makedirs(filepath)
-    torch.save(state, filepath+'/'+filename)
+def save_checkpoint(state, is_best, workpath, filename='checkpoint.pth.tar'):
+    if not os.path.exists(workpath):
+        os.makedirs(workpath)
+    torch.save(state, workpath+'/'+filename)
     if is_best:
-        shutil.copyfile(filepath+'/'+filename, filepath+'/'+'model_best.pth.tar')
+        shutil.copyfile(workpath+'/'+filename, workpath+'/'+'model_best.pth.tar')
 
 
 def train(train_loader, model, criterion, optimizer, epoch, device, args):
@@ -193,6 +199,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
     losses = []
     top1 = []
     top5 = []
+    throughputs = []
 
     # switch to train mode
     model.train()
@@ -202,6 +209,11 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         # move data to the same device as model
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+
+        # throughputs
+        batch_size = images.size(0)
+        throughput = batch_size / (time.time() - end)
+        throughputs.append(throughput)
 
         # compute output
         output = model(images)
@@ -222,19 +234,31 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         # measure elapsed time
         batch_time.append(time.time() - end)
         end = time.time()
+        # measure gpu situation
+        gpu_utilization = torch.cuda.utilization(device)
+        memory_allocated = torch.cuda.memory_allocated(device) / 1e9
+        memory_reserved = torch.cuda.memory_reserved(device) / 1e9
+
+        with open(args.csv_path, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                epoch, i, batch_time[-1], losses[-1], top1[-1].item(), top5[-1].item(), throughput,
+                gpu_utilization, memory_allocated, memory_reserved
+            ])
 
         if i % args.print_freq == 0:
-            print(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}')
+            print(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}, throughput: {throughputs[-1]:6.2f} samples/s')
             with open(args.logpath, 'a') as file:
-                file.write(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}\n')
-
+                file.write(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}, throughput: {throughputs[-1]:6.2f} samples/s\n')
+    
     batch_time = torch.Tensor(batch_time)
     losses = torch.Tensor(losses)
     top1 = torch.Tensor(top1)
     top5 = torch.Tensor(top5)
-    print(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}')
+    avg_throughput = sum(throughputs) / len(throughputs)
+    print(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}, throughput: {avg_throughput:6.2f} samples/s')
     with open(args.logpath, 'a') as file:
-        file.write(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}\n')
+        file.write(f'=== epoch {epoch} average: batch_time: {batch_time.mean():6.3f}, loss: {losses.mean():.4e}, top1: {top1.mean():6.2f}, top5: {top5.mean():6.2f}, throughput: {avg_throughput:6.2f} samples/s\n')
 
 def validate(val_loader, model, criterion, args):
 
@@ -262,6 +286,12 @@ def validate(val_loader, model, criterion, args):
             losses.append(loss.item())
             top1.append(acc1[0])
             top5.append(acc5[0])
+
+            # with open(args.csv_path, mode='a', newline='') as file:
+            #     writer = csv.writer(file)
+            #     writer.writerow([
+            #         'Validation', i, batch_time[-1], losses[-1], top1[-1], top5[-1], 0, 0, 0, 0
+            #     ])
 
             if i % args.print_freq == 0:
                 print(f'\t\tround {i}, batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}')

@@ -4,6 +4,7 @@ import random
 import time
 import numpy as np
 import shutil
+import csv
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -25,9 +26,9 @@ parser.add_argument('data', metavar='DIR', nargs='?', default='/inspire/hdd/ws-f
                     help='path to dataset (default: imagenet)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=90, type=int, metavar='N',
+parser.add_argument('--epochs', default=5, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
+parser.add_argument('-b', '--batch-size', default=64, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -52,13 +53,12 @@ parser.add_argument('--seed', default=212, type=int,
 
 
 
-def save_checkpoint(state, is_best, exp_name, filename='checkpoint.pth.tar'):
-    filepath = '/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/chenxinyan-240108120066/chenxinyan/engineering_hw3/outputs/' + exp_name
-    if not os.path.exists(filepath):
-        os.makedirs(filepath)
-    torch.save(state, filepath+'/'+filename)
+def save_checkpoint(state, is_best, workpath, filename='checkpoint.pth.tar'):
+    if not os.path.exists(workpath):
+        os.makedirs(workpath)
+    torch.save(state, workpath+'/'+filename)
     if is_best:
-        shutil.copyfile(filepath+'/'+filename, filepath+'/'+'model_best.pth.tar')
+        shutil.copyfile(workpath+'/'+filename, workpath+'/'+'model_best.pth.tar')
 
 
 def train(train_loader, model, criterion, optimizer, epoch, device, group, rank, size, args):
@@ -66,6 +66,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, group, rank,
     losses = []
     top1 = []
     top5 = []
+    throughputs = []
 
     # switch to train mode
     model.train()
@@ -75,6 +76,11 @@ def train(train_loader, model, criterion, optimizer, epoch, device, group, rank,
         # move data to the same device as model, asynchronous
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+
+        # throughputs
+        batch_size = images.size(0)
+        throughput = batch_size / (time.time() - end)
+        throughputs.append(throughput)
 
         # compute output
         output = model(images)
@@ -99,12 +105,23 @@ def train(train_loader, model, criterion, optimizer, epoch, device, group, rank,
         # measure elapsed time
         batch_time.append(time.time() - end)
         end = time.time()
+        # measure gpu situation
+        gpu_utilization = torch.cuda.utilization(device)
+        memory_allocated = torch.cuda.memory_allocated(device) / 1e9
+        memory_reserved = torch.cuda.memory_reserved(device) / 1e9
+
+        with open(args.csv_path, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([
+                epoch, i, batch_time[-1], losses[-1], top1[-1].item(), top5[-1].item(), throughput,
+                gpu_utilization, memory_allocated, memory_reserved
+            ])
 
         if rank == 0 and i % args.print_freq == 0:
-            print(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}')
+            print(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}, throughput: {throughputs[-1]:6.2f} samples/s')
             with open(args.logpath, 'a') as file:
-                file.write(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}\n')
-
+                file.write(f'round {i}({epoch}), batch_time: {batch_time[-1]:6.3f}, loss: {losses[-1]:.4e}, top1: {top1[-1]:6.2f}, top5: {top5[-1]:6.2f}, throughput: {throughputs[-1]:6.2f} samples/s\n')
+    
     batch_time = torch.Tensor(batch_time)
     losses = torch.Tensor(losses)
     top1 = torch.Tensor(top1)
@@ -175,14 +192,21 @@ def accuracy(output, target, topk=(1,)):
 
 def run(rank, size, args):
     # logs
-    logpath = '/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/chenxinyan-240108120066/chenxinyan/engineering_hw3/outputs/' + args.name
-    if not os.path.exists(logpath):
-        os.makedirs(logpath)
-    logpath = logpath + '/log.txt'
+    workpath = '/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/chenxinyan-240108120066/chenxinyan/engineering_hw3/outputs/' + args.name
+    if rank == 0:
+        if not os.path.exists(workpath):
+            os.makedirs(workpath)
+    logpath = workpath + '/log.txt'
     if rank == 0:
         with open(logpath, 'a') as file:
             file.write(f"Experiment: {args.name}\n")
     args.logpath = logpath
+
+    csv_path = workpath + f'/metrics_{rank}.csv'
+    with open(csv_path, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Epoch', 'Batch', 'Batch Time', 'Loss', 'Top1 Accuracy', 'Top5 Accuracy', 'Throughput (samples/s)', 'GPU Utilization (%)', 'Memory Allocated (GB)', 'Memory Reserved (GB)'])
+    args.csv_path = csv_path
 
     # seed
     random.seed(args.seed)
@@ -273,12 +297,12 @@ def run(rank, size, args):
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-            }, is_best, args.name)
+            }, is_best, workpath)
 
 def init_process(rank, size, fn, args, backend='nccl'):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = 'localhost' # '127.0.0.1'
-    os.environ['MASTER_PORT'] = '8090'
+    os.environ['MASTER_PORT'] = '8066'
     os.environ['NCCL_ALGO'] = 'Ring' # 'Tree'
     dist.init_process_group(backend, rank=rank, world_size=size)
     fn(rank, size, args)
@@ -286,7 +310,7 @@ def init_process(rank, size, fn, args, backend='nccl'):
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    size = 2
+    size = 4
     processes = []
     mp.set_start_method("spawn")
     for rank in range(size):

@@ -501,6 +501,7 @@ def main():
     #         print("=> no checkpoint found at '{}'".format(args.resume))
 
     # initial DDP
+    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
     model = MyDDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
     
 
